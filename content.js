@@ -1,77 +1,96 @@
 (function() {
   'use strict';
 
-  const ARABIC_SCRIPT_REGEX = /[\u0600-\u06FF]/;
-  const RTL_THRESHOLD = 0.2;
-  const DEBOUNCE_MS = 100;
+  // Arabic script range: includes Arabic, Persian, Urdu, etc.
+  const ARABIC_SCRIPT_REGEX = /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]/;
+  const DEBOUNCE_MS = 50;
 
   const processedElements = new WeakSet();
   const debounceTimers = new WeakMap();
+  let mutationTimer = null;
+  const MUTATION_THROTTLE_MS = 500;
 
-  function isMostlyRTL(str) {
-    const trimmed = str.trim();
-    if (trimmed.length === 0) {
-      return false;
-    }
-
-    const nonWhitespace = trimmed.replace(/\s/g, '');
-    if (nonWhitespace.length === 0) {
-      return false;
-    }
-
-    let rtlCount = 0;
-    for (let i = 0; i < nonWhitespace.length; i++) {
-      if (ARABIC_SCRIPT_REGEX.test(nonWhitespace[i])) {
-        rtlCount++;
-      }
-    }
-
-    return rtlCount / nonWhitespace.length >= RTL_THRESHOLD;
+  function hasRTL(str) {
+    if (!str || typeof str !== 'string') return false;
+    
+    // Simple check: if we find ANY Arabic/Persian character, return true (RTL)
+    // Use search() instead of test() to avoid regex state issues
+    return str.search(ARABIC_SCRIPT_REGEX) !== -1;
   }
 
   function getElementText(el) {
-    if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
-      return el.value || '';
-    }
-    if (el.isContentEditable) {
-      return el.innerText || el.textContent || '';
+    if (!el) return '';
+    
+    try {
+      if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
+        return el.value || '';
+      }
+      if (el.isContentEditable) {
+        return el.innerText || el.textContent || '';
+      }
+    } catch (e) {
+      return '';
     }
     return '';
   }
 
   function applyDirection(el) {
-    const text = getElementText(el);
-    const isRTL = isMostlyRTL(text);
+    if (!el || !el.nodeName) return;
+    
+    try {
+      const text = getElementText(el);
+      const isRTL = hasRTL(text);
 
-    if (isRTL) {
-      el.dir = 'rtl';
-      el.classList.remove('auto-ltr');
-      el.classList.add('auto-rtl');
-    } else {
-      el.dir = 'ltr';
-      el.classList.remove('auto-rtl');
-      el.classList.add('auto-ltr');
+      // Simple logic: if ANY Persian/Arabic character exists → RTL, otherwise → LTR
+      if (isRTL) {
+        el.dir = 'rtl';
+        el.style.direction = 'rtl';
+        el.style.textAlign = 'right';
+        el.style.unicodeBidi = 'plaintext';
+        if (el.classList) {
+          el.classList.remove('auto-ltr');
+          el.classList.add('auto-rtl');
+        }
+      } else {
+        el.dir = 'ltr';
+        el.style.direction = 'ltr';
+        el.style.textAlign = 'left';
+        el.style.unicodeBidi = 'plaintext';
+        if (el.classList) {
+          el.classList.remove('auto-rtl');
+          el.classList.add('auto-ltr');
+        }
+      }
+    } catch (e) {
+      // Silent fail
     }
   }
 
   function shouldProcessElement(el) {
-    if (!el || processedElements.has(el)) {
-      return false;
-    }
+    if (!el || !el.nodeName) return false;
+    if (processedElements.has(el)) return false;
 
-    if (el.tagName === 'INPUT') {
-      const type = (el.type || '').toLowerCase();
+    const tagName = el.tagName;
+    
+    if (tagName === 'INPUT') {
+      const type = (el.type || 'text').toLowerCase();
       const excludedTypes = ['password', 'email', 'number', 'tel', 'url', 'search'];
       if (excludedTypes.includes(type)) {
         return false;
       }
-    }
-
-    if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {
       return true;
     }
 
-    if (el.isContentEditable || el.getAttribute('contenteditable') === 'true' || el.getAttribute('contenteditable') === '') {
+    if (tagName === 'TEXTAREA') {
+      return true;
+    }
+
+    if (el.isContentEditable) {
+      return true;
+    }
+
+    const contenteditable = el.getAttribute('contenteditable');
+    if (contenteditable === 'true' || contenteditable === '') {
       return true;
     }
 
@@ -79,17 +98,15 @@
   }
 
   function attachListeners(el) {
-    if (processedElements.has(el)) {
-      return;
-    }
+    if (!el || processedElements.has(el)) return;
 
-    const handler = () => {
+    const handler = function() {
       const existingTimer = debounceTimers.get(el);
       if (existingTimer) {
         clearTimeout(existingTimer);
       }
 
-      const timer = setTimeout(() => {
+      const timer = setTimeout(function() {
         applyDirection(el);
         debounceTimers.delete(el);
       }, DEBOUNCE_MS);
@@ -97,63 +114,139 @@
       debounceTimers.set(el, timer);
     };
 
-    el.addEventListener('input', handler, { passive: true });
-    el.addEventListener('keyup', handler, { passive: true });
-    processedElements.add(el);
-  }
-
-  function initAutoDir(root) {
-    const selector = 'input:not([type="password"]):not([type="email"]):not([type="number"]):not([type="tel"]):not([type="url"]):not([type="search"]), textarea, [contenteditable="true"], [contenteditable=""]';
+    // For contenteditable and textarea, also listen to keyup to catch Enter key
+    const keyupHandler = function(e) {
+      if (e.key === 'Enter' || e.keyCode === 13) {
+        // Apply direction immediately after Enter
+        setTimeout(function() {
+          applyDirection(el);
+        }, 10);
+      }
+    };
 
     try {
-      const elements = root.querySelectorAll ? root.querySelectorAll(selector) : [];
+      el.addEventListener('input', handler, { passive: true });
       
-      for (let i = 0; i < elements.length; i++) {
-        const el = elements[i];
+      // Add keyup for contenteditable and textarea elements to catch Enter
+      if (el.isContentEditable || el.getAttribute('contenteditable') || el.tagName === 'TEXTAREA') {
+        el.addEventListener('keyup', keyupHandler, { passive: true });
+      }
+      
+      processedElements.add(el);
+      applyDirection(el);
+    } catch (e) {
+      // Silent fail
+    }
+  }
+
+  function processElements(root) {
+    if (!root || typeof root.querySelectorAll !== 'function') return;
+
+    try {
+      // Process inputs
+      const inputs = root.querySelectorAll('input');
+      for (let i = 0; i < inputs.length; i++) {
+        const el = inputs[i];
         if (shouldProcessElement(el)) {
-          applyDirection(el);
+          attachListeners(el);
+        }
+      }
+
+      // Process textareas
+      const textareas = root.querySelectorAll('textarea');
+      for (let i = 0; i < textareas.length; i++) {
+        const el = textareas[i];
+        if (shouldProcessElement(el)) {
+          attachListeners(el);
+        }
+      }
+
+      // Process contenteditable elements
+      const contenteditables = root.querySelectorAll('[contenteditable]');
+      for (let i = 0; i < contenteditables.length; i++) {
+        const el = contenteditables[i];
+        if (shouldProcessElement(el)) {
           attachListeners(el);
         }
       }
     } catch (e) {
-      // Silently ignore querySelector errors
+      // Silent fail
     }
   }
 
   function handleMutation(mutations) {
-    for (let i = 0; i < mutations.length; i++) {
-      const mutation = mutations[i];
-      if (mutation.addedNodes) {
-        for (let j = 0; j < mutation.addedNodes.length; j++) {
-          const node = mutation.addedNodes[j];
-          if (node.nodeType === Node.ELEMENT_NODE) {
-            if (shouldProcessElement(node)) {
-              applyDirection(node);
-              attachListeners(node);
+    if (mutationTimer) {
+      clearTimeout(mutationTimer);
+    }
+
+    mutationTimer = setTimeout(function() {
+      try {
+        const newElements = [];
+        
+        for (let i = 0; i < mutations.length; i++) {
+          const mutation = mutations[i];
+          if (mutation.addedNodes) {
+            for (let j = 0; j < mutation.addedNodes.length; j++) {
+              const node = mutation.addedNodes[j];
+              if (node && node.nodeType === 1) {
+                // Only process if it's a new input/textarea/contenteditable element
+                // Skip text nodes and other non-element nodes
+                if (shouldProcessElement(node)) {
+                  newElements.push(node);
+                }
+                // Only search for children if it's a container element
+                // Skip if it's already an input/textarea/contenteditable
+                if (node.querySelectorAll && !shouldProcessElement(node)) {
+                  const children = node.querySelectorAll('input, textarea, [contenteditable]');
+                  for (let k = 0; k < children.length; k++) {
+                    if (shouldProcessElement(children[k])) {
+                      newElements.push(children[k]);
+                    }
+                  }
+                }
+              }
             }
-            initAutoDir(node);
           }
         }
+
+        // Process new elements
+        for (let i = 0; i < newElements.length; i++) {
+          attachListeners(newElements[i]);
+        }
+      } catch (e) {
+        // Silent fail
       }
-    }
+    }, MUTATION_THROTTLE_MS);
   }
 
   function init() {
-    if (document.readyState === 'loading') {
-      document.addEventListener('DOMContentLoaded', () => {
-        initAutoDir(document);
-      });
-    } else {
-      initAutoDir(document);
+    if (typeof document === 'undefined') return;
+
+    function run() {
+      processElements(document);
+      
+      // Setup MutationObserver with delay to avoid interfering with typing
+      setTimeout(function() {
+        if (typeof MutationObserver !== 'undefined' && document.documentElement) {
+          try {
+            const observer = new MutationObserver(handleMutation);
+            observer.observe(document.documentElement, {
+              childList: true,
+              subtree: true
+            });
+          } catch (e) {
+            // Silent fail
+          }
+        }
+      }, 1000);
     }
 
-    const observer = new MutationObserver(handleMutation);
-    observer.observe(document.documentElement, {
-      childList: true,
-      subtree: true
-    });
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', run, { once: true });
+    } else {
+      setTimeout(run, 100);
+    }
   }
 
   init();
 })();
-
