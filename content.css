@@ -1,0 +1,12 @@
+.auto-rtl {
+  direction: rtl !important;
+  unicode-bidi: plaintext !important;
+  text-align: right !important;
+}
+
+.auto-ltr {
+  direction: ltr !important;
+  unicode-bidi: plaintext !important;
+  text-align: left !important;
+}
+
